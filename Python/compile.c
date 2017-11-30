@@ -1203,6 +1203,7 @@ compiler_addop_j(struct compiler *c, int opcode, basicblock *b, int absolute)
 
     assert(HAS_ARG(opcode));
     assert(b != NULL);
+    // Add a new instruction to the current block
     off = compiler_next_instr(c, c->u->u_curblock);
     if (off < 0)
         return 0;
@@ -1378,6 +1379,9 @@ find_ann(asdl_seq *stmts)
         case While_kind:
             res = find_ann(st->v.While.body) ||
                   find_ann(st->v.While.orelse);
+            break;
+        case Until_kind:
+            res = find_ann(st->v.Until.body);
             break;
         case If_kind:
             res = find_ann(st->v.If.body) ||
@@ -2354,13 +2358,18 @@ static int
 compiler_while(struct compiler *c, stmt_ty s)
 {
     basicblock *loop, *orelse, *end, *anchor = NULL;
+
+    // Check whether Until.test is a constant (e.g. num/string/etc.)
     int constant = expr_constant(c, s->v.While.test);
 
+    // If the constant is "False", visit the "else" block
     if (constant == 0) {
         if (s->v.While.orelse)
             VISIT_SEQ(c, stmt, s->v.While.orelse);
         return 1;
     }
+
+    // Create some new empty blocks and return if we couldn't allocate
     loop = compiler_new_block(c);
     end = compiler_new_block(c);
     if (constant == -1) {
@@ -2399,6 +2408,51 @@ compiler_while(struct compiler *c, stmt_ty s)
     compiler_pop_fblock(c, LOOP, loop);
     if (orelse != NULL) /* what if orelse is just pass? */
         VISIT_SEQ(c, stmt, s->v.While.orelse);
+    compiler_use_next_block(c, end);
+
+    return 1;
+}
+
+static int
+compiler_until(struct compiler *c, stmt_ty s)
+{
+    basicblock *loop, *end, *anchor = NULL;
+
+    // Check whether Until.test is a constant (e.g. num/string/etc.)
+    int constant = expr_constant(c, s->v.Until.test);
+
+    // If the constant is "True", end
+    if (constant == 1) {
+        return 1;
+    }
+
+    // Create some new empty blocks and return if we couldn't allocate
+    loop = compiler_new_block(c);
+    end = compiler_new_block(c);
+    if (constant == -1) {
+        anchor = compiler_new_block(c);
+        if (anchor == NULL)
+            return 0;
+    }
+    if (loop == NULL || end == NULL)
+        return 0;
+
+    ADDOP_JREL(c, SETUP_LOOP, end);
+    compiler_use_next_block(c, loop);
+    if (!compiler_push_fblock(c, LOOP, loop))
+        return 0;
+    if (constant == -1) {
+        if (!compiler_jump_if(c, s->v.Until.test, anchor, 1))
+            return 0;
+    }
+    VISIT_SEQ(c, stmt, s->v.Until.body);
+    ADDOP_JABS(c, JUMP_ABSOLUTE, loop);
+
+    if (constant == -1)
+        compiler_use_next_block(c, anchor);
+
+    ADDOP(c, POP_BLOCK);
+    compiler_pop_fblock(c, LOOP, loop);
     compiler_use_next_block(c, end);
 
     return 1;
@@ -2932,6 +2986,8 @@ compiler_visit_stmt(struct compiler *c, stmt_ty s)
         return compiler_for(c, s);
     case While_kind:
         return compiler_while(c, s);
+    case Until_kind:
+        return compiler_until(c, s);
     case If_kind:
         return compiler_if(c, s);
     case Raise_kind:
